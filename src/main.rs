@@ -5,60 +5,59 @@
 
 use panic_rtt_target as _;
 use rtic::app;
-use rtic_monotonics::create_systick_token;
-use rtic_monotonics::systick::Systick;
 use rtt_target::{rprintln, rtt_init_print};
-use stm32f4xx_hal::gpio::{Output, PushPull, PA5};
+use stm32f4xx_hal::gpio::{Edge, Input, PA0};
 use stm32f4xx_hal::prelude::*;
 
-#[app(device = stm32f4xx_hal::pac, peripherals = true, dispatchers = [SPI1])]
+#[app(device = stm32f4xx_hal::pac, peripherals = true)]
 mod app {
 
     use super::*;
+
+    #[derive(Debug)]
+    enum Direction {
+        Up,
+        Down,
+    }
 
     #[shared]
     struct Shared {}
 
     #[local]
     struct Local {
-        led: PA5<Output<PushPull>>,
-        state: bool,
+        receiver: PA0<Input>,
+        direction: Direction,
     }
 
     #[init]
     fn init(cx: init::Context) -> (Shared, Local) {
         rtt_init_print!();
-        // Setup clocks
-        let rcc = cx.device.RCC.constrain();
+        let mut dp = cx.device;
+        let mut syscfg = dp.SYSCFG.constrain();
 
-        let systick_mono_token = create_systick_token!();
-        Systick::start(cx.core.SYST, 36_000_000, systick_mono_token);
-        let _clocks = rcc.cfgr.sysclk(36.MHz()).freeze();
+        let gpioa = dp.GPIOA.split();
+        let mut receiver = gpioa.pa0.into_pull_up_input();
 
-        // Setup LED
-        let gpioa = cx.device.GPIOA.split();
-        let mut led = gpioa.pa5.into_push_pull_output();
-        led.set_high();
+        receiver.make_interrupt_source(&mut syscfg);
+        receiver.trigger_on_edge(&mut dp.EXTI, Edge::Falling);
+        receiver.enable_interrupt(&mut dp.EXTI);
 
-        // Schedule the blinking task
-        blink::spawn().ok();
-
-        (Shared {}, Local { led, state: false })
+        (
+            Shared {},
+            Local {
+                receiver,
+                direction: Direction::Up,
+            },
+        )
     }
 
-    #[task(local = [led, state])]
-    async fn blink(cx: blink::Context) {
-        loop {
-            if *cx.local.state {
-                cx.local.led.set_high();
-                *cx.local.state = false;
-            } else {
-                cx.local.led.set_low();
-                *cx.local.state = true;
-            }
-
-            rprintln!("Blinky fuck");
-            Systick::delay(1000.millis()).await;
+    #[task(binds = EXTI0, local = [receiver, direction])]
+    fn receive_signal(ctx: receive_signal::Context) {
+        ctx.local.receiver.clear_interrupt_pending_bit();
+        rprintln!("{:?}", ctx.local.direction);
+        match ctx.local.direction {
+            Direction::Up => *ctx.local.direction = Direction::Down,
+            Direction::Down => *ctx.local.direction = Direction::Up,
         }
     }
 }
